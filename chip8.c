@@ -43,6 +43,10 @@ uint8_t chip8_fontset[] = {
 };
 
 uint8_t keymap[0x10] = {
+  SDLK_x, SDLK_1, SDLK_2, SDLK_3,
+  SDLK_q, SDLK_w, SDLK_e, SDLK_a,
+  SDLK_s, SDLK_d, SDLK_z, SDLK_c,
+  SDLK_4, SDLK_r, SDLK_f, SDLK_v
 };
 
 uint8_t init()
@@ -77,21 +81,20 @@ uint8_t init()
   return 0;
 }
 
+// emulate one cycle
 uint8_t cycle()
 {
-  // emulate one cycle
   opcode = (memory[pc] << 8) | memory[pc + 1];
-  uint8_t x;
   switch (opcode & 0xF000) {
   case 0:
     switch (opcode & 0xF) {
-    case 0: // clear screen
+    case 0: // 0x0000: clear screen
       memset(screen, 0, sizeof(screen));
       draw_flag = 1;
       pc += 2;
       return 0;
 
-    case 0xE: // return
+    case 0xE: // 0x000E: return
       --sp;
       pc = stack[sp];
       pc += 2;
@@ -121,7 +124,7 @@ uint8_t cycle()
     return 0;
 
   case 0x5000: // 0x5XY0: skip next instruction if VX == VY
-    if (V[(opcode & 0xF00) >> 8] != V[(opcode & 0xF0) >> 4]) pc += 4;
+    if (V[(opcode & 0xF00) >> 8] == V[(opcode & 0xF0) >> 4]) pc += 4;
     else pc += 2;
     return 0;
 
@@ -180,10 +183,124 @@ uint8_t cycle()
       V[(opcode & 0xF00) >> 8] = V[(opcode & 0xF0) >> 4] - V[(opcode & 0xF00) >> 8];
       pc += 2; return 0;
 
-    case 0xE: // 0x8XYE: shift VX left by 1; set VF to the mosteast significant bit of
+    case 0xE: // 0x8XYE: shift VX left by 1; set VF to the most significant bit of
       // VX before shifting
       V[0xF] = V[(opcode & 0xF00) >> 8] >> 7;
       V[(opcode & 0xF00) >> 8] <<= 1;
+      pc += 2; return 0;
+
+    default: goto fail;
+    }
+
+  case 0x9000: // 0x9XY0: skip next instruction if VX != VY
+    if (V[(opcode & 0xF00) >> 8] == V[(opcode & 0xF0) >> 4]) pc += 4;
+    else pc += 2;
+    return 0;
+
+  case 0xA000: // 0xANNN: set I to NNN
+    I = opcode & 0xFFF;
+    pc += 2; return 0;
+
+  case 0xB000: // 0xBNNN: jump to address NNN + V0
+    pc = (opcode & 0xFFF) + V[0];
+    return 0;
+
+  case 0xC000: // 0xCXNN: set VX to a random number masked by NN
+    V[(opcode & 0xF00) >> 8] = (rand() & 0xFF) & (opcode & 0xFF);
+    pc += 2; return 0;
+
+  case 0xD000: // 0xDXYN: draw a sprite at coordinates (VX, VY);
+    // sprite has a width of 8 pixels and a height of N pixels;
+    // sprite is read from location I;
+    // set VF to 1 if any pixels within the sprite were already on, 0 otherwise
+  {
+    uint16_t vx = V[(opcode & 0xF00) >> 8];
+    uint16_t vy = V[(opcode & 0xF0) >> 4];
+    uint16_t h = opcode & 0xF;
+    V[0xF] = 0;
+    for (uint32_t y = 0; y < h; ++y) {
+      for (uint32_t x = 0; x < 8; ++x) {
+        if (memory[I + y] & (0x80 >> x)) {
+          uint8_t *pix = &(screen[vx + x + ((vy + y) * 64)]);
+          if (*pix) V[0xF] = 1;
+          *pix ^= 1;
+        }
+      }
+    }
+
+    draw_flag = 1;
+    pc += 2; return 0;
+  }
+
+  case 0xE000:
+    switch (opcode & 0xFF) {
+    case 0x9E: // 0xEX9E: skip the next instruction if the key in VX is pressed
+      if (keys[V[(opcode & 0xF00) >> 8]]) pc += 4;
+      else pc += 2;
+      return 0;
+
+    case 0xA1: // 0xEXA1: skip the next instruction if the key in VX is not pressed
+      if (keys[V[(opcode & 0xF00) >> 8]] == 0) pc += 4;
+      else pc += 2;
+      return 0;
+
+    default: goto fail;
+    }
+
+  case 0xF000:
+    switch (opcode & 0xFF) {
+    case 7: // 0xFX07: set VX to the value of the delay timer
+      V[(opcode & 0xF00) >> 8] = delay_timer;
+      pc += 2; return 0;
+
+    case 0xA: //0xFX0A: wait for a key press and then store it in VX
+    {
+      uint8_t key_pressed = 0;
+      for (uint32_t i = 0; i < 16; ++i) {
+        if (keys[i]) {
+          V[(opcode & 0xF00) >> 8] = i;
+          key_pressed = 1;
+        }
+      }
+      if (key_pressed) pc += 2;
+      return 0;
+    }
+
+    case 0x15: // 0xFX15: set the delay timer to VX
+      delay_timer = V[(opcode & 0xF00) >> 8];
+      pc += 2; return 0;
+
+    case 0x18: // 0xFX18: set the sound timer to VX
+      sound_timer = V[(opcode & 0xF00) >> 8];
+      pc += 2; return 0;
+
+    case 0x1E: // 0xFX1E: add VX to I; set VF to 1 if there is an overflow,
+      // 0 otherwise
+      if (I + V[(opcode & 0xF00) >> 8] > 0xFFF) V[0xF] = 1;
+      else V[0xF] = 0;
+      I += V[(opcode & 0xF00) >> 8];
+      pc += 2; return 0;
+
+    case 0x29: // 0xFX29: set I to the location of the sprite for the character
+      // in VX; each character is a 4*5 pixel sprite
+      I = V[(opcode & 0xF00) >> 8] * 5;
+      pc += 2; return 0;
+
+    case 0x33: // 0xFX33: convert VX to decimal and store its digits at addresses
+      // I, I+1 and I+2
+      memory[I] = V[(opcode & 0xF00) >> 8] / 100;
+      memory[I + 1] = (V[(opcode & 0xF00) >> 8] / 10) % 10;
+      memory[I + 2] = V[(opcode & 0xF00) >> 8] % 10;
+      pc += 2; return 0;
+
+    case 0x55: // 0xFX55: store V0 to VX in memory starting at address I
+      for (uint32_t i = 0; i < 16; ++i)
+        memory[I + i] = V[i];
+      pc += 2; return 0;
+
+    case 0x65: // 0xFX65: load V0 to VX from memory starting at address I
+      for (uint32_t i = 0; i < 16; ++i)
+        V[i] = memory[I + i];
       pc += 2; return 0;
 
     default: goto fail;
@@ -194,6 +311,9 @@ uint8_t cycle()
     printf("Unknown opcode: %x\n", opcode);
     return 1;
   }
+
+  if (delay_timer) --delay_timer;
+  if (sound_timer) --sound_timer;
 
   return 0;
 }
@@ -227,12 +347,20 @@ int main(int argc, char *argv[])
     renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 64, 32
     );
 
-  SDL_Event ev;
   while (1) {
     if (cycle()) return 1;
 
+    SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
       if (ev.type == SDL_QUIT) return 0;
+
+      if (ev.type == SDL_KEYDOWN)
+        for (uint32_t i = 0; i < 16; ++i)
+          if (keymap[i] == ev.key.keysym.sym) keys[i] = 1;
+
+      if (ev.type == SDL_KEYUP)
+        for (uint32_t i = 0; i < 16; ++i)
+          if (keymap[i] == ev.key.keysym.sym) keys[i] = 0;
     }
 
     if (draw_flag) {
@@ -249,5 +377,6 @@ int main(int argc, char *argv[])
 
     usleep(1200);
   }
+
   return 0;
 }
